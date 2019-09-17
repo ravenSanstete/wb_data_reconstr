@@ -51,11 +51,13 @@ class classifier(nn.Module):
             param.requires_grad = False
         return
 
-class mlp_classifier(nn.Module):
+class small_classifier(nn.Module):
     def __init__(self):
-        super(mlp_classifier, self).__init__()
-        self.fc1 = nn.Linear(28*28, 50)
-        self.fc2 = nn.Linear(50, 10)
+        super(small_classifier, self).__init__()
+        self.fc1 = nn.Linear(28*28, 128)
+        self.fc2 = nn.Linear(128, 32)
+        self.fc3 = nn.Linear(32, 16)
+        self.fc4 = nn.Linear(16, 10)
 
     def forward(self, x):
         x = x.view(-1, 28*28)
