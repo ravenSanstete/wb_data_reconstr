@@ -21,8 +21,10 @@ class Extractor(nn.Module):
             input_dim = sample_params[2*i].shape[1] + 1 # (feature concat bias) 
             if(i > 0):
                 input_dim += self.rep_dims[i-1] * sample_params[2*i].shape[1]
-            self.phi_modules.append(Linear(
-                input_dim, self.rep_dims[i]))
+            self.phi_modules.append(nn.Sequential(
+                Linear(input_dim, self.rep_dims[i]),
+                nn.Sigmoid()
+            ))
         self.phi_modules = nn.ModuleList(self.phi_modules)
         print(self.phi_modules)
         # construct the rho module (an MLP)

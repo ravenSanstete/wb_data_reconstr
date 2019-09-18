@@ -40,7 +40,7 @@ if not os.path.exists('./mlp_img'):
 
 num_epochs = 1
 batch_size = 128
-learning_rate = 1e-3
+
 
 
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -103,20 +103,39 @@ def collect_training_data():
     one_dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
     model =  small_classifier().cuda()
     criterion = nn.CrossEntropyLoss()
+    learning_rate = 1.0
     optimizer = torch.optim.SGD(model.parameters(), lr = learning_rate)
+    PRINT_FREQ = 100
 
-    theta_t_0 = get_parameter(model)
-    dump(get_dumpable_param(model), 'theta_0.pkl')
     
     # save the theta_t_0 data
-    theta_t_1 = theta_t_0
+    # theta_t_1 = theta_t_0
     # extractor = Extractor(theta_t_0, [50, 30, 10, 10], [50, 32])
     # extractor = extractor.cuda()
     # nn_feature = extractor(theta_t_0)
     # print(nn_feature)
     data = []
     count = 0
+    train_optimizer = torch.optim.Adam(model.parameters(), lr = 0.005)
+    running_loss = 0.0
+    for x, y in dataloader:
+        x, y = x.cuda(), y.cuda()
+        preds = model(x)
+        # obtain the gradient
+        loss = criterion(preds, y)
+        train_optimizer.zero_grad()
+        loss.backward()
+        train_optimizer.step()
+        running_loss += loss.data
+        count += 1
+        if(count % PRINT_FREQ == 0):
+            print("Pretrain Iteration: {} Loss: {}".format(count, running_loss / PRINT_FREQ))
+            running_loss = 0.0
+    count = 0
+    theta_t_0 = get_parameter(model)
+    dump(get_dumpable_param(model), 'theta_0.pkl')
 
+    
     for x, y in one_dataloader:
         tmp = get_dumpable_param(model)
         x, y = x.cuda(), y.cuda()
@@ -126,18 +145,20 @@ def collect_training_data():
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        # print(loss)
         ### =================== CUSTOMIZED =====================
-        with torch.no_grad():
             # theta_t_0 = [param.clone() for param in theta_t_1]
             # after update, obtain the parameters
         # print(model.named_parameters())
-            theta_t_1 = get_dumpable_param(model)
-            data.append((x.cpu().numpy(), theta_t_1))
+        theta_t_1 = get_dumpable_param(model)
+        data.append((x.cpu().numpy(), theta_t_1))
+        theta_t_1 = get_parameter(model)
             # copy the theta_t_0 back
-            copy_from_param(model, theta_t_0)
+        copy_from_param(model, theta_t_0)
 
         count += 1
-        # print(theta_t_1)        
+        delta_theta = [(paramA - paramB) for paramA, paramB in zip(theta_t_1, theta_t_0)]
+        # print(delta_theta[-1])        
         if(count > 10000):
             break
             # delta = [(-p_1 +p_0).detach() for p_1, p_0 in zip(theta_t_1, theta_t_0)]
@@ -153,10 +174,11 @@ class Reconstructor(nn.Module):
         super(Reconstructor, self).__init__()
         self.module = nn.Sequential(
             Linear(in_dim, 50),
-            nn.Sigmoid(),
+            nn.Tanh(),
             Linear(50, 50),
-            nn.Sigmoid(),
-            Linear(50, 28 * 28))
+            nn.Tanh(),
+            Linear(50, 28 * 28),
+            nn.Tanh())
 
     def forward(self, x):
         return self.module(x)
@@ -166,15 +188,30 @@ class Attacker(nn.Module):
     def __init__(self, param, rep_dims, feature_dims):
         super(Attacker, self).__init__()
         self.extractor = Extractor(param, rep_dims, feature_dims)
-        self.reconstructor = Reconstructor(feature_dims[-1])
-
+        self.delta = True
+        if(not self.delta):
+            self.reconstructor = Reconstructor(2 * feature_dims[-1])
+        else:
+            self.reconstructor = Reconstructor(feature_dims[-1])
+ 
     def forward(self, param_old, param_new):
-        param_old = self.extractor(param_old)
-        param_new = self.extractor(param_new)
-        # param_new = torch.cat([param_old, param_new])
-        param_new = param_new + param_old
-        param_new = self.reconstructor(param_new)
-        return param_new
+        # donnot allow the gradient to pass to the old parameter
+        scale = 10.0
+        # param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
+        # print(param_delta[-1])
+        # with torch.no_grad():
+        if(not self.delta):
+            param_old = self.extractor(param_old)
+            param_new = self.extractor(param_new)
+            param_new = torch.cat([param_old, param_new])
+            param_new = self.reconstructor(param_new)
+            return param_new
+        else:
+            param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
+            param_delta = self.extractor(param_delta)
+            param_delta = self.reconstructor(param_delta)
+            return param_delta
+            
         
 
 def reform(theta):
@@ -185,8 +222,8 @@ def train_attacker():
     PRINT_FREQ = 10
     theta_0 = load('theta_0.pkl')
     theta_0 = reform(theta_0)
-    rep_dims = [50, 30, 10, 10]
-    feature_dims = [50, 50]
+    rep_dims = [50, 50, 20, 10]
+    feature_dims = [50]
   
     attacker = Attacker(theta_0, rep_dims, feature_dims)
     attacker.cuda()
@@ -195,10 +232,10 @@ def train_attacker():
     dataset = load('atk_dataset.pkl')
     criterion = nn.MSELoss()
     max_epoch = 10
-    optimizer = optim.Adam(attacker.parameters(), lr=0.001)
+    optimizer = optim.Adam(attacker.parameters(), lr=0.005)
     running_loss = 0.0
     count = 0
-    batch_size = 64
+    batch_size = 128
     batch_count = 0
     loss = 0.0
     for epoch in range(max_epoch):
@@ -221,9 +258,9 @@ def train_attacker():
                     print("Iteration {} Loss: {:.4f}".format(batch_count, running_loss / (PRINT_FREQ * batch_size)))
                     running_loss = 0.0
                     pic = to_img(x_prime.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + 'mnist_image_{}.png'.format(count))
+                    save_image(pic, PREFIX + 'mnist_image_{}.png'.format(batch_count))
                     pic = to_img(x.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + 'mnist_image_{}_gt.png'.format(count))
+                    save_image(pic, PREFIX + 'mnist_image_{}_gt.png'.format(batch_count))
                 
     
             
