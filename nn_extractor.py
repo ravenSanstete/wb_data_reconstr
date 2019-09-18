@@ -16,24 +16,27 @@ class Extractor(nn.Module):
         assert len(rep_dims) == (len(sample_params) // 2)
         self.phi_modules = []
         self.rep_dims = rep_dims
+        self.VERBOSE = False
         # self.feature_dim = feature_dim
         for i in range(len(sample_params)//2):
-            input_dim = sample_params[2*i].shape[1] + 1 # (feature concat bias) 
+            input_dim = sample_params[2*i].shape[1] + 1 # (feature concat bias)
             if(i > 0):
-                input_dim += self.rep_dims[i-1] * sample_params[2*i].shape[1]
+                input_dim += self.rep_dims[i-1] # * sample_params[2*i].shape[1]
             self.phi_modules.append(nn.Sequential(
                 Linear(input_dim, self.rep_dims[i]),
-                nn.Sigmoid()
+                nn.BatchNorm1d(self.rep_dims[i]), # do a batch normalization over the neurons
+                nn.Tanh()
             ))
         self.phi_modules = nn.ModuleList(self.phi_modules)
         print(self.phi_modules)
+        
         # construct the rho module (an MLP)
         self.rho = []
         input_dim = np.sum(self.rep_dims)
         for i, output_dim in enumerate(feature_dims):
             self.rho.append(("fc_{}".format(i), Linear(input_dim, output_dim)))
             if(i < len(feature_dims) - 1):
-                self.rho.append(("sigmoid_{}".format(i), nn.Sigmoid()))
+                self.rho.append(("sigmoid_{}".format(i), nn.Tanh()))
             input_dim = output_dim
         self.rho = nn.Sequential(OrderedDict(self.rho))
         print(self.rho)
@@ -47,26 +50,26 @@ class Extractor(nn.Module):
             bias = params[2*i+1]
             layer_feature = torch.cat((weight, bias.unsqueeze(1)), dim = 1)
             if(i > 0):
-                context = torch.cat([layer_features[-1][i, :] for i in range(layer_features[-1].size(0))], dim = 0)
+                # context = torch.cat([layer_features[-1][i, :] for i in range(layer_features[-1].size(0))], dim = 0)
+                context =  torch.mean(layer_features[-1], dim = 0) 
                 context = context.unsqueeze(0).repeat_interleave(layer_feature.size(0), dim = 0)
                 layer_feature = torch.cat((layer_feature, context), dim = 1)
+            # do batch normalization over it
             layer_feature = self.phi_modules[i](layer_feature)
             layer_features.append(layer_feature)
+            
         for i in range(layer_num):
             layer_features[i] = torch.sum(layer_features[i], dim = 0)
+            if(self.VERBOSE):
+                print("Layer {}'s  Feature: {}".format(i+1, layer_features[i]))
         nn_feature = torch.cat(layer_features)
+        if(self.VERBOSE):
+            print("Concatenated  Feature: {}".format(nn_feature))
         nn_feature = self.rho(nn_feature)
+        print("Final Feature: {}".format(nn_feature))
+        
         return nn_feature
     
-        
-        
-            
-            
-            
-            
-        # @input: the structured parameters of an nn
-        # @output: a vector-form feature
-        pass
         
         
         

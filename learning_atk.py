@@ -173,43 +173,59 @@ class Reconstructor(nn.Module):
     def __init__(self, in_dim):
         super(Reconstructor, self).__init__()
         self.module = nn.Sequential(
-            Linear(in_dim, 50),
-            nn.Tanh(),
-            Linear(50, 50),
-            nn.Tanh(),
-            Linear(50, 28 * 28),
+            Linear(in_dim, 28 * 28),
             nn.Tanh())
 
     def forward(self, x):
         return self.module(x)
 
 
+class AutoEncoder(nn.Module):
+    def __init__(self, reconstructor, in_dim):
+        super(AutoEncoder, self).__init__()
+        self.reconstructor = reconstructor
+        self.module = nn.Sequential(
+            Linear(28*28, in_dim),
+            nn.ReLU(True),
+            self.reconstructor
+        )
+
+    def forward(self, x):
+        return self.module(x)
+    
+        
+
 class Attacker(nn.Module):
     def __init__(self, param, rep_dims, feature_dims):
         super(Attacker, self).__init__()
         self.extractor = Extractor(param, rep_dims, feature_dims)
         self.delta = True
-        if(not self.delta):
-            self.reconstructor = Reconstructor(2 * feature_dims[-1])
-        else:
-            self.reconstructor = Reconstructor(feature_dims[-1])
+        self.concat = False
+        self.in_dim = 2 * feature_dims[-1] if((not self.delta) and self.concat) else feature_dims[-1]
+        self.reconstructor = Reconstructor(self.in_dim)
  
     def forward(self, param_old, param_new):
         # donnot allow the gradient to pass to the old parameter
-        scale = 10.0
+        scale = 1.0
         # param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
         # print(param_delta[-1])
         # with torch.no_grad():
-        if(not self.delta):
-            param_old = self.extractor(param_old)
+        if(not self.delta):       
+            with torch.no_grad():
+                param_old = self.extractor(param_old)
             param_new = self.extractor(param_new)
-            param_new = torch.cat([param_old, param_new])
+            if(self.concat):
+                param_new = torch.cat([param_old, param_new])
+            else:
+                param_new = param_new # + param_old
             param_new = self.reconstructor(param_new)
+
             return param_new
         else:
             param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
             param_delta = self.extractor(param_delta)
             param_delta = self.reconstructor(param_delta)
+            
             return param_delta
             
         
@@ -217,32 +233,82 @@ class Attacker(nn.Module):
 def reform(theta):
     return [torch.FloatTensor(param).cuda() for param in theta]
 
+
+def pretrain(attacker):
+    ae = AutoEncoder(attacker.reconstructor, attacker.in_dim)
+    ae.cuda()
+    PRINT_FREQ = 100
+    count = 0
+    train_optimizer = torch.optim.Adam(ae.parameters(), lr = 0.01)
+    running_loss = 0.0
+    criterion = nn.MSELoss()
+    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+    for i in range(1):
+        for x, _ in dataloader:
+            x = x.cuda()
+            x = x.reshape(-1, 28*28)
+            x_prime = ae(x)
+            # obtain the gradient
+            loss = criterion(x, x_prime)
+            train_optimizer.zero_grad()
+            loss.backward()
+            train_optimizer.step()
+            running_loss += loss.data
+            count += 1
+            if(count % PRINT_FREQ == 0):
+                print("Pretrain Iteration: {} Loss: {}".format(count, running_loss / PRINT_FREQ))
+                running_loss = 0.0
+            if(count % 1000 == 0):              
+                pic = to_img(x_prime[0, :].detach().cpu().unsqueeze(0).data)
+                save_image(pic, PREFIX + 'mnist_image_{}_pretrain.png'.format(count // 1000))
+                pic = to_img(x[0, :].detach().cpu().unsqueeze(0).data)
+                save_image(pic, PREFIX + 'mnist_image_{}_gt_pretrain.png'.format(count // 1000))
+            if(count > 1000):
+                break
+    return ae
+    
+    
+
+
 def train_attacker():
     # first load the data
-    PRINT_FREQ = 10
+    PRINT_FREQ = 100
     theta_0 = load('theta_0.pkl')
     theta_0 = reform(theta_0)
-    rep_dims = [50, 50, 20, 10]
-    feature_dims = [50]
+    rep_dims = [50, 30, 10, 10]
+    feature_dims = [128]
   
     attacker = Attacker(theta_0, rep_dims, feature_dims)
+    
     attacker.cuda()
+
+    # autoencoder = pretrain(attacker)
+    # print(get_parameter(attacker.reconstructor))
+    # print(get_parameter(autoencoder.reconstructor))
     ## load training set
     print("Loading atk dataset ...")
     dataset = load('atk_dataset.pkl')
     criterion = nn.MSELoss()
     max_epoch = 10
-    optimizer = optim.Adam(attacker.parameters(), lr=0.005)
+    optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
+                            {'params': attacker.extractor.parameters()}], lr=0.005)
     running_loss = 0.0
     count = 0
-    batch_size = 128
+    batch_size = 1
     batch_count = 0
     loss = 0.0
+
+    # do pretrain the reconstructor part
+    
+    
     for epoch in range(max_epoch):
         print("Epoch {} ...".format(epoch))
         for x, theta_1 in dataset:
+            theta_1 = reform(theta_1)
             count += 1
-            x_prime = attacker(theta_0, reform(theta_1))
+            # print(theta_1[-1] - theta_0[-1])
+            x_prime = attacker(theta_0, theta_1)
             x = torch.FloatTensor(x).reshape(-1).cuda()
             current_loss = criterion(x_prime, x)
             loss += current_loss
