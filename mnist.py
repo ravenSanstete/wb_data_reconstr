@@ -5,6 +5,7 @@ import torch
 import torchvision
 from torch import nn
 import torch.nn.functional as F
+from torch.nn import Linear
 
 img_transform = transforms.Compose([
     transforms.ToTensor(),
@@ -21,6 +22,7 @@ def to_img(x):
     x = 0.5 * (x + 1)
     x = x.clamp(0, 1)
     x = x.view(x.size(0), 1, 28, 28)
+
     return x
 def postprocess(x):
     x = 0.5 * (x + 1)
@@ -68,3 +70,15 @@ class small_classifier(nn.Module):
         return x
 
     
+
+    
+class Reconstructor(nn.Module):
+    def __init__(self, in_dim, input_dim):
+        super(Reconstructor, self).__init__()
+        self.module = nn.Sequential(
+            Linear(in_dim, input_dim),
+            nn.Tanh())
+
+    def forward(self, x):
+        return self.module(x)
+

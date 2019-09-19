@@ -5,6 +5,7 @@ import torch
 import torchvision
 from torch import nn
 import torch.nn.functional as F
+from torch.nn import Linear
 from scipy import ndimage
 
 
@@ -20,13 +21,15 @@ test_dataset = CIFAR10('./data', train=False, transform=img_transform)
 
 
 def to_img(x):
+    x = x.view(x.size(0), 3, 32, 32)
     mean = torch.FloatTensor([0.2023, 0.1994, 0.2010])
     std = torch.FloatTensor([0.4914, 0.4822, 0.4465])
     unnormalize = transforms.Normalize((-mean / std).tolist(), (1.0 / std).tolist())
     x = torch.FloatTensor(np.array([unnormalize(x[i, :, :, :]).numpy() for i in range(x.size(0))]))
     x = x.clamp(0, 1)
-    x = x.view(x.size(0), 1, 32, 32)
     return x
+
+
 def postprocess(x):
     mean = torch.FloatTensor([0.2023, 0.1994, 0.2010])
     std = torch.FloatTensor([0.4914, 0.4822, 0.4465])
@@ -102,21 +105,50 @@ class classifier(nn.Module):
         return x
 
 
+# class small_classifier(nn.Module):
+#     def __init__(self):
+#         super(small_classifier, self).__init__()
+#         self.conv1 = nn.Conv2d(3, 6, 5)
+#         self.pool = nn.MaxPool2d(2, 2)
+#         self.conv2 = nn.Conv2d(6, 16, 5)
+#         self.fc1 = nn.Linear(16 * 5 * 5, 120)
+#         self.fc2 = nn.Linear(120, 84)
+#         self.fc3 = nn.Linear(84, 10)
+
+#     def forward(self, x):
+#         x = self.pool(F.relu(self.conv1(x)))
+#         x = self.pool(F.relu(self.conv2(x)))
+#         x = x.view(-1, 16 * 5 * 5)
+#         x = F.relu(self.fc1(x))
+#         x = F.relu(self.fc2(x))
+#         x = self.fc3(x)
+#         return x
+
+
 class small_classifier(nn.Module):
     def __init__(self):
         super(small_classifier, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 5 * 5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.fc1 = nn.Linear(32*32*3, 128)
+        self.fc2 = nn.Linear(128, 32)
+        self.fc3 = nn.Linear(32, 16)
+        self.fc4 = nn.Linear(16, 10)
 
     def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 5 * 5)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = x.view(-1, 32*32*3)
+        x = torch.sigmoid(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        x = torch.sigmoid(self.fc3(x))
+        x = self.fc4(x)
         return x
+
+
+class Reconstructor(nn.Module):
+    def __init__(self, in_dim, input_dim):
+        super(Reconstructor, self).__init__()
+        self.module = nn.Sequential(
+            Linear(in_dim, input_dim),
+            nn.Tanh())
+
+    def forward(self, x):
+        return self.module(x)
+

@@ -59,14 +59,15 @@ class Extractor(nn.Module):
             layer_features.append(layer_feature)
             
         for i in range(layer_num):
-            layer_features[i] = torch.sum(layer_features[i], dim = 0)
+            layer_features[i] = torch.mean(layer_features[i], dim = 0)
             if(self.VERBOSE):
                 print("Layer {}'s  Feature: {}".format(i+1, layer_features[i]))
         nn_feature = torch.cat(layer_features)
         if(self.VERBOSE):
             print("Concatenated  Feature: {}".format(nn_feature))
         nn_feature = self.rho(nn_feature)
-        print("Final Feature: {}".format(nn_feature))
+        
+        if(self.VERBOSE): print("Final Feature: {}".format(nn_feature))
         
         return nn_feature
     

@@ -15,13 +15,24 @@ import torch.nn.functional as F
 import torch.autograd as autograd
 from torch.nn import Linear
 from tqdm import tqdm
-from mnist import img_transform, dataset, test_dataset, to_img, postprocess, classifier, small_classifier
+
+TASK = 'cifar10'
+
+if(TASK == 'mnist'):
+    from mnist import img_transform, dataset, test_dataset, to_img, postprocess, classifier, small_classifier, Reconstructor
+    INPUT_DIM = 28 * 28
+    PREFIX = 'data/attack/mnist/'
+else:
+    from cifar10 import img_transform, dataset, test_dataset, to_img, postprocess, classifier, small_classifier, Reconstructor
+    INPUT_DIM = 32 * 32 * 3
+    PREFIX = 'data/attack/cifar10/'
+    
 from nn_extractor import Extractor
 import pickle as pickle
 import torch.optim as optim
 from tqdm import tqdm
 
-PREFIX = 'data/attack/'
+
 
 def dump(obj, path):
     f = open(PREFIX + path, 'w+b')
@@ -118,22 +129,24 @@ def collect_training_data():
     count = 0
     train_optimizer = torch.optim.Adam(model.parameters(), lr = 0.005)
     running_loss = 0.0
-    for x, y in dataloader:
-        x, y = x.cuda(), y.cuda()
-        preds = model(x)
-        # obtain the gradient
-        loss = criterion(preds, y)
-        train_optimizer.zero_grad()
-        loss.backward()
-        train_optimizer.step()
-        running_loss += loss.data
-        count += 1
-        if(count % PRINT_FREQ == 0):
-            print("Pretrain Iteration: {} Loss: {}".format(count, running_loss / PRINT_FREQ))
-            running_loss = 0.0
+    for i in range(1):
+        for x, y in dataloader:
+            x, y = x.cuda(), y.cuda()
+            preds = model(x)
+            # obtain the gradient
+            loss = criterion(preds, y)
+            train_optimizer.zero_grad()
+            loss.backward()
+            train_optimizer.step()
+            running_loss += loss.data
+            count += 1
+            if(count % PRINT_FREQ == 0):
+                print("Pretrain Iteration: {} Loss: {}".format(count, running_loss / PRINT_FREQ))
+                eval_classifier(model, test_loader)
+                running_loss = 0.0
     count = 0
     theta_t_0 = get_parameter(model)
-    dump(get_dumpable_param(model), 'theta_0.pkl')
+    dump(get_dumpable_param(model), '{}_theta_0.pkl'.format(TASK))
 
     
     for x, y in one_dataloader:
@@ -164,20 +177,9 @@ def collect_training_data():
             # delta = [(-p_1 +p_0).detach() for p_1, p_0 in zip(theta_t_1, theta_t_0)]
             # print(delta)
     print("Dumping ...")
-    dump(data, 'atk_dataset.pkl')
+    dump(data, '{}_atk_dataset.pkl'.format(TASK))
         # optimizer.step()
         
-
-
-class Reconstructor(nn.Module):
-    def __init__(self, in_dim):
-        super(Reconstructor, self).__init__()
-        self.module = nn.Sequential(
-            Linear(in_dim, 28 * 28),
-            nn.Tanh())
-
-    def forward(self, x):
-        return self.module(x)
 
 
 class AutoEncoder(nn.Module):
@@ -185,7 +187,8 @@ class AutoEncoder(nn.Module):
         super(AutoEncoder, self).__init__()
         self.reconstructor = reconstructor
         self.module = nn.Sequential(
-            Linear(28*28, in_dim),
+            Linear(INPUT_DIM, in_dim),
+            nn.BatchNorm1d(in_dim),
             nn.ReLU(True),
             self.reconstructor
         )
@@ -199,10 +202,10 @@ class Attacker(nn.Module):
     def __init__(self, param, rep_dims, feature_dims):
         super(Attacker, self).__init__()
         self.extractor = Extractor(param, rep_dims, feature_dims)
-        self.delta = True
-        self.concat = False
+        self.delta = False
+        self.concat = True
         self.in_dim = 2 * feature_dims[-1] if((not self.delta) and self.concat) else feature_dims[-1]
-        self.reconstructor = Reconstructor(self.in_dim)
+        self.reconstructor = Reconstructor(self.in_dim, INPUT_DIM)
  
     def forward(self, param_old, param_new):
         # donnot allow the gradient to pass to the old parameter
@@ -217,7 +220,7 @@ class Attacker(nn.Module):
             if(self.concat):
                 param_new = torch.cat([param_old, param_new])
             else:
-                param_new = param_new # + param_old
+                param_new = param_new + param_old
             param_new = self.reconstructor(param_new)
 
             return param_new
@@ -239,15 +242,15 @@ def pretrain(attacker):
     ae.cuda()
     PRINT_FREQ = 100
     count = 0
-    train_optimizer = torch.optim.Adam(ae.parameters(), lr = 0.01)
+    train_optimizer = torch.optim.Adam(ae.parameters(), lr = 0.005)
     running_loss = 0.0
     criterion = nn.MSELoss()
-    dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-    for i in range(1):
+    for i in range(10):
         for x, _ in dataloader:
             x = x.cuda()
-            x = x.reshape(-1, 28*28)
+            x = x.reshape(-1, INPUT_DIM)
             x_prime = ae(x)
             # obtain the gradient
             loss = criterion(x, x_prime)
@@ -261,11 +264,9 @@ def pretrain(attacker):
                 running_loss = 0.0
             if(count % 1000 == 0):              
                 pic = to_img(x_prime[0, :].detach().cpu().unsqueeze(0).data)
-                save_image(pic, PREFIX + 'mnist_image_{}_pretrain.png'.format(count // 1000))
+                save_image(pic, PREFIX + '{}_image_{}_pretrain.png'.format(TASK, count // 1000))
                 pic = to_img(x[0, :].detach().cpu().unsqueeze(0).data)
-                save_image(pic, PREFIX + 'mnist_image_{}_gt_pretrain.png'.format(count // 1000))
-            if(count > 1000):
-                break
+                save_image(pic, PREFIX + '{}_image_{}_gt_pretrain.png'.format(TASK, count // 1000))
     return ae
     
     
@@ -273,37 +274,47 @@ def pretrain(attacker):
 
 def train_attacker():
     # first load the data
-    PRINT_FREQ = 100
-    theta_0 = load('theta_0.pkl')
+    PRINT_FREQ = 10
+    CACHED = False
+    theta_0 = load('{}_theta_0.pkl'.format(TASK))
     theta_0 = reform(theta_0)
-    rep_dims = [50, 30, 10, 10]
-    feature_dims = [128]
-  
-    attacker = Attacker(theta_0, rep_dims, feature_dims)
-    
-    attacker.cuda()
+    rep_dims = [50, 50, 30, 20]
+    feature_dims = [64] # 64
 
-    # autoencoder = pretrain(attacker)
+    
+    attacker = Attacker(theta_0, rep_dims, feature_dims)
+    PATH = PREFIX + 'attacker_delta.cpt'
+    if(CACHED):
+        print("Loading Model and Resume ...")
+        attacker.load_state_dict(torch.load(PATH))
+    attacker.cuda()
+    print(attacker)
+    # if(not CACHED): pretrain(attacker)
+  
+
+    # if(not CACHED): autoencoder = pretrain(attacker)
     # print(get_parameter(attacker.reconstructor))
     # print(get_parameter(autoencoder.reconstructor))
     ## load training set
     print("Loading atk dataset ...")
-    dataset = load('atk_dataset.pkl')
-    criterion = nn.MSELoss()
-    max_epoch = 10
+    dataset = load('{}_atk_dataset.pkl'.format(TASK))
+    criterion = nn.L1Loss() # nn.MSELoss()
+    max_epoch = 100
     optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
                             {'params': attacker.extractor.parameters()}], lr=0.005)
     running_loss = 0.0
     count = 0
-    batch_size = 1
+    batch_size = 32
     batch_count = 0
     loss = 0.0
 
+    # I also need to let the model in the batch form
+    
     # do pretrain the reconstructor part
-    
-    
+    best_loss = 100.0
     for epoch in range(max_epoch):
         print("Epoch {} ...".format(epoch))
+        # do shuffling per epoch, construct the batch and do batch normalization manually
         for x, theta_1 in dataset:
             theta_1 = reform(theta_1)
             count += 1
@@ -321,13 +332,22 @@ def train_attacker():
                 batch_count += 1
                 loss = 0.0
                 if(batch_count % PRINT_FREQ == 0):
-                    print("Iteration {} Loss: {:.4f}".format(batch_count, running_loss / (PRINT_FREQ * batch_size)))
-                    running_loss = 0.0
+                    running_loss = running_loss / (PRINT_FREQ * batch_size)
+                    print("Iteration {} Loss: {:.4f}".format(batch_count, running_loss))
+
                     pic = to_img(x_prime.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + 'mnist_image_{}.png'.format(batch_count))
+                    save_image(pic, PREFIX + '{}_image_{}.png'.format(TASK, batch_count))
                     pic = to_img(x.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + 'mnist_image_{}_gt.png'.format(batch_count))
-                
+                    save_image(pic, PREFIX + '{}_image_{}_gt.png'.format(TASK, batch_count))
+                    if(running_loss < best_loss):
+                        best_loss = running_loss
+                        print("save model best loss {:.4f}".format(best_loss))
+                        torch.save(attacker.state_dict(), PATH)
+                    running_loss = 0.0
+    
+                    
+    # save data
+    
     
             
             
