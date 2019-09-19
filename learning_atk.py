@@ -129,7 +129,7 @@ def collect_training_data():
     count = 0
     train_optimizer = torch.optim.Adam(model.parameters(), lr = 0.005)
     running_loss = 0.0
-    for i in range(1):
+    for i in range(3):
         for x, y in dataloader:
             x, y = x.cuda(), y.cuda()
             preds = model(x)
@@ -278,8 +278,9 @@ def train_attacker():
     CACHED = False
     theta_0 = load('{}_theta_0.pkl'.format(TASK))
     theta_0 = reform(theta_0)
-    rep_dims = [50, 50, 30, 20]
-    feature_dims = [64] # 64
+    rep_dims = [500, 200, 100, 50]
+    feature_dims = [256] # 64
+    use_l1_loss = True
 
     
     attacker = Attacker(theta_0, rep_dims, feature_dims)
@@ -289,7 +290,7 @@ def train_attacker():
         attacker.load_state_dict(torch.load(PATH))
     attacker.cuda()
     print(attacker)
-    # if(not CACHED): pretrain(attacker)
+    if(not CACHED): pretrain(attacker)
   
 
     # if(not CACHED): autoencoder = pretrain(attacker)
@@ -298,13 +299,13 @@ def train_attacker():
     ## load training set
     print("Loading atk dataset ...")
     dataset = load('{}_atk_dataset.pkl'.format(TASK))
-    criterion = nn.L1Loss() # nn.MSELoss()
+    criterion = nn.L1Loss()  # nn.L1Loss() #
     max_epoch = 100
-    optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
-                            {'params': attacker.extractor.parameters()}], lr=0.005)
+    optimizer = optim.Adam([{'params': attacker.reconstructor.parameters(), 'lr': 5e-4},
+                            {'params': attacker.extractor.parameters()}], lr=0.001)
     running_loss = 0.0
     count = 0
-    batch_size = 32
+    batch_size = 128
     batch_count = 0
     loss = 0.0
 
