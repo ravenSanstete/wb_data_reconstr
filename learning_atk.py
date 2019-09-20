@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import torch.autograd as autograd
 from torch.nn import Linear
 from tqdm import tqdm
+import torch.utils.data as data_util
 
 TASK = 'cifar10'
 
@@ -59,6 +60,11 @@ one_dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size = 64, shuffle = True)
 
+
+def concat_param(params):
+    params = [param.flatten() for param in params]
+    params = np.concatenate(params)
+    return params
 
 # from modelB to modelA
 def copy_from(modelA, modelB):
@@ -164,7 +170,7 @@ def collect_training_data():
             # after update, obtain the parameters
         # print(model.named_parameters())
         theta_t_1 = get_dumpable_param(model)
-        data.append((x.cpu().numpy(), theta_t_1))
+        data.append((x.cpu().numpy(), concat_param(theta_t_1)))
         theta_t_1 = get_parameter(model)
             # copy the theta_t_0 back
         copy_from_param(model, theta_t_0)
@@ -218,9 +224,10 @@ class Attacker(nn.Module):
                 param_old = self.extractor(param_old)
             param_new = self.extractor(param_new)
             if(self.concat):
-                param_new = torch.cat([param_old, param_new])
+                param_new = torch.cat([param_old, param_new], dim = 1)
             else:
                 param_new = param_new + param_old
+            # print("Before Reconstructor:{}".format(param_new.shape))
             param_new = self.reconstructor(param_new)
 
             return param_new
@@ -244,10 +251,10 @@ def pretrain(attacker):
     count = 0
     train_optimizer = torch.optim.Adam(ae.parameters(), lr = 0.005)
     running_loss = 0.0
-    criterion = nn.MSELoss()
+    criterion = nn.L1Loss()# nn.MSELoss()
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
-    for i in range(10):
+    for i in range(5):
         for x, _ in dataloader:
             x = x.cuda()
             x = x.reshape(-1, INPUT_DIM)
@@ -269,6 +276,7 @@ def pretrain(attacker):
                 save_image(pic, PREFIX + '{}_image_{}_gt_pretrain.png'.format(TASK, count // 1000))
     return ae
     
+
     
 
 
@@ -277,6 +285,7 @@ def train_attacker():
     PRINT_FREQ = 10
     CACHED = False
     theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0_arr = torch.FloatTensor(concat_param(theta_0))
     theta_0 = reform(theta_0)
     rep_dims = [500, 200, 100, 50]
     feature_dims = [256] # 64
@@ -284,7 +293,7 @@ def train_attacker():
 
     
     attacker = Attacker(theta_0, rep_dims, feature_dims)
-    PATH = PREFIX + 'attacker_delta.cpt'
+    PATH = PREFIX + 'attacker_concat_bn.cpt'
     if(CACHED):
         print("Loading Model and Resume ...")
         attacker.load_state_dict(torch.load(PATH))
@@ -301,50 +310,70 @@ def train_attacker():
     dataset = load('{}_atk_dataset.pkl'.format(TASK))
     criterion = nn.L1Loss()  # nn.L1Loss() #
     max_epoch = 100
-    optimizer = optim.Adam([{'params': attacker.reconstructor.parameters(), 'lr': 5e-4},
-                            {'params': attacker.extractor.parameters()}], lr=0.001)
+    optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
+                            {'params': attacker.extractor.parameters()}], lr=0.005)
     running_loss = 0.0
     count = 0
     batch_size = 128
     batch_count = 0
     loss = 0.0
 
-    # I also need to let the model in the batch form
-    
+    # param = concat_param(dataset[0][1])
+    # print(param.shape)
+    # X = torch.FloatTensor([p for _, p in dataset])
+    # Y = torch.FloatTensor([y for y, _ in dataset])
+
+    # Z = torch.FloatTensor([theta_0 for i in range(len(dataset))])
+
+    # print(X.shape)
+    # print(Y.shape)
+    # print(Z.shape)
+    print("convert to torch dataset ...")
+    X = []
+    Y = []
+    for x, y in dataset:
+        X.append(torch.FloatTensor(x))
+        Y.append(torch.FloatTensor(y).unsqueeze(0))
+
+    X = torch.cat(X, dim = 0)
+    Y = torch.cat(Y, dim = 0)
+    print(X.size())
+    print(Y.size())
+    dataset = data_util.TensorDataset(X, Y)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    print(theta_0_arr.shape)
     # do pretrain the reconstructor part
     best_loss = 100.0
     for epoch in range(max_epoch):
         print("Epoch {} ...".format(epoch))
         # do shuffling per epoch, construct the batch and do batch normalization manually
-        for x, theta_1 in dataset:
-            theta_1 = reform(theta_1)
+        for x, theta_1 in dataloader:
             count += 1
+            x, theta_1 = x.cuda(), theta_1.cuda()
+            _theta_0 = theta_0_arr.unsqueeze(0).repeat_interleave(theta_1.size(0), dim = 0).cuda()
             # print(theta_1[-1] - theta_0[-1])
-            x_prime = attacker(theta_0, theta_1)
-            x = torch.FloatTensor(x).reshape(-1).cuda()
-            current_loss = criterion(x_prime, x)
-            loss += current_loss
-            running_loss += current_loss.data
-            if(count % batch_size == 0):
-                loss /= batch_size
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                batch_count += 1
+            x_prime = attacker(_theta_0, theta_1)
+            x = x.reshape(-1, INPUT_DIM).cuda()
+            loss = criterion(x_prime, x)
+            running_loss += loss.data
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            if(count % PRINT_FREQ == 0):
                 loss = 0.0
-                if(batch_count % PRINT_FREQ == 0):
-                    running_loss = running_loss / (PRINT_FREQ * batch_size)
-                    print("Iteration {} Loss: {:.4f}".format(batch_count, running_loss))
+                running_loss = running_loss / (PRINT_FREQ)
+                print("Iteration {} Loss: {:.4f}".format(count, running_loss))
 
-                    pic = to_img(x_prime.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + '{}_image_{}.png'.format(TASK, batch_count))
-                    pic = to_img(x.detach().cpu().unsqueeze(0).data)
-                    save_image(pic, PREFIX + '{}_image_{}_gt.png'.format(TASK, batch_count))
-                    if(running_loss < best_loss):
-                        best_loss = running_loss
-                        print("save model best loss {:.4f}".format(best_loss))
-                        torch.save(attacker.state_dict(), PATH)
-                    running_loss = 0.0
+                pic = to_img(x_prime[0, :].detach().cpu().unsqueeze(0).data)
+                save_image(pic, PREFIX + '{}_image_{}.png'.format(TASK, count))
+                pic = to_img(x[0, :].detach().cpu().unsqueeze(0).data)
+                save_image(pic, PREFIX + '{}_image_{}_gt.png'.format(TASK, count))
+                if(running_loss < best_loss):
+                    best_loss = running_loss
+                    print("save model best loss {:.4f}".format(best_loss))
+                    torch.save(attacker.state_dict(), PATH)
+                running_loss = 0.0
     
                     
     # save data

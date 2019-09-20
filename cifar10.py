@@ -142,11 +142,18 @@ class small_classifier(nn.Module):
         return x
 
 
+# add the batch normalization layer
+
 class Reconstructor(nn.Module):
     def __init__(self, in_dim, input_dim):
         super(Reconstructor, self).__init__()
+        hidden_1 = 1024
         self.module = nn.Sequential(
-            Linear(in_dim, input_dim),
+            Linear(in_dim, hidden_1),
+            nn.BatchNorm1d(hidden_1),
+            nn.ReLU(True),
+            Linear(hidden_1, input_dim),
+            nn.BatchNorm1d(input_dim),
             nn.Tanh())
 
     def forward(self, x):
