@@ -50,7 +50,7 @@ class Extractor(nn.Module):
         input_dim = np.sum(self.rep_dims)
         for i, output_dim in enumerate(feature_dims):
             self.rho.append(("fc_{}".format(i), Linear(input_dim, output_dim)))
-            # self.rho.append(("bn_{}".format(i), nn.BatchNorm1d(output_dim)))
+            self.rho.append(("bn_{}".format(i), nn.BatchNorm1d(output_dim)))
             # if(i < len(feature_dims) - 1):
             self.rho.append(("sigmoid_{}".format(i), nn.Tanh()))
             input_dim = output_dim

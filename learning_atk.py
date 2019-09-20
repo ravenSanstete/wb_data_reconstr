@@ -16,6 +16,10 @@ import torch.autograd as autograd
 from torch.nn import Linear
 from tqdm import tqdm
 import torch.utils.data as data_util
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 
 TASK = 'cifar10'
 
@@ -113,8 +117,66 @@ def eval_classifier(model, test_loader):
     print('Test set:  Accuracy: {}/{} ({:.2f}%)'.format(
         correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
-  
 
+
+def reform(theta):
+    return [torch.FloatTensor(param).cuda() for param in theta]
+
+
+
+def collect_test_data():
+    one_dataloader = DataLoader(test_dataset, batch_size = 1, shuffle = True)
+    model = small_classifier().cuda()
+    theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0 = reform(theta_0)
+    copy_from_param(model, theta_0)
+    TEST_SIZE = 128
+    criterion = nn.CrossEntropyLoss()
+    learning_rate = 1.0
+    optimizer = torch.optim.SGD(model.parameters(), lr = learning_rate)
+    theta_t_0 = get_parameter(model)
+    data = []
+    count = 0
+    
+    for x, y in one_dataloader:
+        tmp = get_dumpable_param(model)
+        x, y = x.cuda(), y.cuda()
+        preds = model(x)
+        # obtain the gradient
+        loss = criterion(preds, y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        # print(loss)
+        ### =================== CUSTOMIZED =====================
+            # theta_t_0 = [param.clone() for param in theta_t_1]
+            # after update, obtain the parameters
+        # print(model.named_parameters())
+        theta_t_1 = get_dumpable_param(model)
+        data.append((x.cpu().numpy(), concat_param(theta_t_1)))
+        theta_t_1 = get_parameter(model)
+            # copy the theta_t_0 back
+        copy_from_param(model, theta_t_0)
+
+        count += 1
+        delta_theta = [(paramA - paramB) for paramA, paramB in zip(theta_t_1, theta_t_0)]
+        # print(delta_theta[-1])        
+        if(count > TEST_SIZE):
+            break
+            # delta = [(-p_1 +p_0).detach() for p_1, p_0 in zip(theta_t_1, theta_t_0)]
+            # print(delta)
+    print("Dumping ...")
+    dump(data, '{}_atk_dataset.test.pkl'.format(TASK))
+    
+    
+
+
+def truncate(x, threshold = 0.001):
+    x[x < threshold] = 0
+    return x
+    
+    
+    
 
 def collect_training_data():
     one_dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
@@ -232,7 +294,7 @@ class Attacker(nn.Module):
 
             return param_new
         else:
-            param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
+            param_delta = param_new - param_old
             param_delta = self.extractor(param_delta)
             param_delta = self.reconstructor(param_delta)
             
@@ -251,7 +313,7 @@ def pretrain(attacker):
     count = 0
     train_optimizer = torch.optim.Adam(ae.parameters(), lr = 0.005)
     running_loss = 0.0
-    criterion = nn.L1Loss()# nn.MSELoss()
+    criterion = nn.MSELoss()# nn.MSELoss()
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True)
 
     for i in range(5):
@@ -293,7 +355,7 @@ def train_attacker():
 
     
     attacker = Attacker(theta_0, rep_dims, feature_dims)
-    PATH = PREFIX + 'attacker_concat_bn.cpt'
+    PATH = PREFIX + 'attacker_concat_full_bn.cpt'
     if(CACHED):
         print("Loading Model and Resume ...")
         attacker.load_state_dict(torch.load(PATH))
@@ -309,7 +371,7 @@ def train_attacker():
     print("Loading atk dataset ...")
     dataset = load('{}_atk_dataset.pkl'.format(TASK))
     criterion = nn.L1Loss()  # nn.L1Loss() #
-    max_epoch = 100
+    max_epoch = 500
     optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
                             {'params': attacker.extractor.parameters()}], lr=0.005)
     running_loss = 0.0
@@ -317,6 +379,7 @@ def train_attacker():
     batch_size = 128
     batch_count = 0
     loss = 0.0
+    TRUNCATE = True
 
     # param = concat_param(dataset[0][1])
     # print(param.shape)
@@ -377,8 +440,69 @@ def train_attacker():
     
                     
     # save data
+
+    
+def evaluate_attacker(path, figname):
+    # first load the data
+    PRINT_FREQ = 10
+    CACHED = False
+    theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0_arr = torch.FloatTensor(concat_param(theta_0))
+    theta_0 = reform(theta_0)
+    rep_dims = [500, 200, 100, 50]
+    feature_dims = [256] # 64
+
+    attacker = Attacker(theta_0, rep_dims, feature_dims)
+    attacker.eval()
+    attacker.cuda()
+    PATH = PREFIX + path
+    print("Loading Model and Resume ...")
+    attacker.load_state_dict(torch.load(PATH))
+
+    print("Loading atk test dataset ...")
+    dataset = load('{}_atk_dataset.test.pkl'.format(TASK))
+    print("convert to torch dataset ...")
+    X = []
+    Y = []
+    for x, y in dataset:
+        X.append(torch.FloatTensor(x))
+        Y.append(torch.FloatTensor(y).unsqueeze(0))
+    X = torch.cat(X, dim = 0)
+    Y = torch.cat(Y, dim = 0)
+    print(X.size())
+    print(Y.size())
+    theta_1 = Y.cuda()
+    x = X.cuda()
+    _theta_0 = theta_0_arr.unsqueeze(0).repeat_interleave(Y.size(0), dim = 0).cuda()
+    x_prime = attacker(_theta_0, theta_1)
+    x = to_img(x.detach().cpu().data)
+    x_prime = to_img(x_prime.detach().cpu().data)
+    print(x.shape)
+    print(x_prime.shape)
+    mse_loss = F.mse_loss(x, x_prime)
+    print("MSE Loss: {}".format(mse_loss.data))
+    x = x[1:, :, :, :]
+    x_prime = x_prime[1:, :, :, :]
+    
+    def show(img, name):
+        fig, ax = plt.subplots(figsize=(20, 10))
+        npimg = img.numpy()
+        ax.imshow(np.transpose(npimg, (1,2,0)))
+        plt.savefig("result_{}.png".format(name))
+    imgs = []
+    for i in range(x.size(0)):
+        imgs.append(x[i, :, :, :].unsqueeze(0))
+        imgs.append(x_prime[i, :, :, :].unsqueeze(0))
+    imgs = torch.cat(imgs, dim = 0)
+    print(imgs.shape)
+    grid = torchvision.utils.make_grid(imgs, nrow = 32)
+    show(grid, figname)
+    
+
     
     
+    
+      
             
             
 
@@ -387,5 +511,8 @@ def train_attacker():
     
             
 if __name__ == '__main__':
-    train_attacker()
+    PATH = 'attacker_concat_full_bn.cpt'
+    evaluate_attacker(PATH, 'concat_full_eval')
+    # train_attacker()
     # collect_training_data()
+    # collect_test_data()
