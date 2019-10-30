@@ -26,7 +26,7 @@ def to_img(x):
     mean = torch.FloatTensor([0.4914, 0.4822, 0.4465])
     unnormalize = transforms.Normalize((-mean / std).tolist(), (1.0 / std).tolist())
     x = torch.FloatTensor(np.array([unnormalize(x[i, :, :, :]).numpy() for i in range(x.size(0))]))
-    x = x.clamp(0, 1)
+    # x = x.clamp(0, 1)
     return x
 
 
@@ -145,9 +145,12 @@ class small_classifier(nn.Module):
 # add the batch normalization layer
 
 class Reconstructor(nn.Module):
-    def __init__(self, in_dim, input_dim):
+    def __init__(self, in_dim, input_dim, cls_num = 10):
         super(Reconstructor, self).__init__()
+        
         hidden_1 = 1024
+        self.embedding = nn.Embedding(cls_num, in_dim)
+        
         self.module = nn.Sequential(
             Linear(in_dim, hidden_1),
             nn.BatchNorm1d(hidden_1),
@@ -156,6 +159,12 @@ class Reconstructor(nn.Module):
             nn.BatchNorm1d(input_dim),
             nn.Tanh())
 
-    def forward(self, x):
+    def forward(self, x, y):
+        # from y get the embedding
+        y = self.embedding(y).squeeze(1)
+        # print(y.size())
+        # print(x.size())
+        x = x + y #
+        # print(x.size())
         return self.module(x)
 

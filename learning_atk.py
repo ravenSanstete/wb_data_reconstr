@@ -127,7 +127,7 @@ def reform(theta):
 def collect_test_data():
     one_dataloader = DataLoader(test_dataset, batch_size = 1, shuffle = True)
     model = small_classifier().cuda()
-    theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0 = load('{}_theta_0_new.pkl'.format(TASK))
     theta_0 = reform(theta_0)
     copy_from_param(model, theta_0)
     TEST_SIZE = 128
@@ -153,7 +153,7 @@ def collect_test_data():
             # after update, obtain the parameters
         # print(model.named_parameters())
         theta_t_1 = get_dumpable_param(model)
-        data.append((x.cpu().numpy(), concat_param(theta_t_1)))
+        data.append((x.cpu().numpy(), concat_param(theta_t_1), y.cpu().numpy()))
         theta_t_1 = get_parameter(model)
             # copy the theta_t_0 back
         copy_from_param(model, theta_t_0)
@@ -166,7 +166,7 @@ def collect_test_data():
             # delta = [(-p_1 +p_0).detach() for p_1, p_0 in zip(theta_t_1, theta_t_0)]
             # print(delta)
     print("Dumping ...")
-    dump(data, '{}_atk_dataset.test.pkl'.format(TASK))
+    dump(data, '{}_atk_dataset_new.test.pkl'.format(TASK))
     
     
 
@@ -214,7 +214,7 @@ def collect_training_data():
                 running_loss = 0.0
     count = 0
     theta_t_0 = get_parameter(model)
-    dump(get_dumpable_param(model), '{}_theta_0.pkl'.format(TASK))
+    dump(get_dumpable_param(model), '{}_theta_0_new.pkl'.format(TASK))
 
     
     for x, y in one_dataloader:
@@ -232,7 +232,7 @@ def collect_training_data():
             # after update, obtain the parameters
         # print(model.named_parameters())
         theta_t_1 = get_dumpable_param(model)
-        data.append((x.cpu().numpy(), concat_param(theta_t_1)))
+        data.append((x.cpu().numpy(), concat_param(theta_t_1), y.cpu().numpy()))
         theta_t_1 = get_parameter(model)
             # copy the theta_t_0 back
         copy_from_param(model, theta_t_0)
@@ -245,7 +245,7 @@ def collect_training_data():
             # delta = [(-p_1 +p_0).detach() for p_1, p_0 in zip(theta_t_1, theta_t_0)]
             # print(delta)
     print("Dumping ...")
-    dump(data, '{}_atk_dataset.pkl'.format(TASK))
+    dump(data, '{}_atk_dataset_new.pkl'.format(TASK))
         # optimizer.step()
         
 
@@ -272,10 +272,14 @@ class Attacker(nn.Module):
         self.extractor = Extractor(param, rep_dims, feature_dims)
         self.delta = False
         self.concat = True
-        self.in_dim = 2 * feature_dims[-1] if((not self.delta) and self.concat) else feature_dims[-1]
+        self.in_dim = feature_dims[-1]
+        self.linear_mapping = nn.Sequential(Linear( 2 * feature_dims[-1], feature_dims[-1]),
+                                                    nn.BatchNorm1d(feature_dims[-1]),
+                                                    nn.ReLU(True))
         self.reconstructor = Reconstructor(self.in_dim, INPUT_DIM)
- 
-    def forward(self, param_old, param_new):
+        
+
+    def forward(self, param_old, param_new, y):
         # donnot allow the gradient to pass to the old parameter
         scale = 1.0
         # param_delta = [(paramA - paramB) * scale  for paramA, paramB in zip(param_new, param_old)]
@@ -285,18 +289,21 @@ class Attacker(nn.Module):
             with torch.no_grad():
                 param_old = self.extractor(param_old)
             param_new = self.extractor(param_new)
+            
             if(self.concat):
                 param_new = torch.cat([param_old, param_new], dim = 1)
+                param_new = self.linear_mapping(param_new)
             else:
                 param_new = param_new + param_old
             # print("Before Reconstructor:{}".format(param_new.shape))
-            param_new = self.reconstructor(param_new)
+            param_new = self.reconstructor(param_new, y)
 
             return param_new
         else:
             param_delta = param_new - param_old
             param_delta = self.extractor(param_delta)
-            param_delta = self.reconstructor(param_delta)
+            param_delta = self.reconstructor(param_delta, y)
+            
             
             return param_delta
             
@@ -346,7 +353,7 @@ def train_attacker():
     # first load the data
     PRINT_FREQ = 10
     CACHED = False
-    theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0 = load('{}_theta_0_new.pkl'.format(TASK))
     theta_0_arr = torch.FloatTensor(concat_param(theta_0))
     theta_0 = reform(theta_0)
     rep_dims = [500, 200, 100, 50]
@@ -355,13 +362,13 @@ def train_attacker():
 
     
     attacker = Attacker(theta_0, rep_dims, feature_dims)
-    PATH = PREFIX + 'attacker_concat_full_bn.cpt'
+    PATH = PREFIX + 'attacker_delta_with_label.cpt'
     if(CACHED):
         print("Loading Model and Resume ...")
         attacker.load_state_dict(torch.load(PATH))
     attacker.cuda()
     print(attacker)
-    if(not CACHED): pretrain(attacker)
+    # if(not CACHED): pretrain(attacker)
   
 
     # if(not CACHED): autoencoder = pretrain(attacker)
@@ -369,7 +376,7 @@ def train_attacker():
     # print(get_parameter(autoencoder.reconstructor))
     ## load training set
     print("Loading atk dataset ...")
-    dataset = load('{}_atk_dataset.pkl'.format(TASK))
+    dataset = load('{}_atk_dataset_new.pkl'.format(TASK))
     criterion = nn.L1Loss()  # nn.L1Loss() #
     max_epoch = 500
     optimizer = optim.Adam([{'params': attacker.reconstructor.parameters()},
@@ -394,15 +401,20 @@ def train_attacker():
     print("convert to torch dataset ...")
     X = []
     Y = []
-    for x, y in dataset:
+    labels = []
+    for x, y, label in dataset:
         X.append(torch.FloatTensor(x))
         Y.append(torch.FloatTensor(y).unsqueeze(0))
+        labels.append(label)
 
     X = torch.cat(X, dim = 0)
     Y = torch.cat(Y, dim = 0)
+    labels = torch.LongTensor(labels)
+    
     print(X.size())
     print(Y.size())
-    dataset = data_util.TensorDataset(X, Y)
+    print(labels.size())
+    dataset = data_util.TensorDataset(X, Y, labels)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     print(theta_0_arr.shape)
@@ -411,12 +423,12 @@ def train_attacker():
     for epoch in range(max_epoch):
         print("Epoch {} ...".format(epoch))
         # do shuffling per epoch, construct the batch and do batch normalization manually
-        for x, theta_1 in dataloader:
+        for x, theta_1, label in dataloader:
             count += 1
-            x, theta_1 = x.cuda(), theta_1.cuda()
+            x, theta_1, label = x.cuda(), theta_1.cuda(), label.cuda()
             _theta_0 = theta_0_arr.unsqueeze(0).repeat_interleave(theta_1.size(0), dim = 0).cuda()
             # print(theta_1[-1] - theta_0[-1])
-            x_prime = attacker(_theta_0, theta_1)
+            x_prime = attacker(_theta_0, theta_1, label)
             x = x.reshape(-1, INPUT_DIM).cuda()
             loss = criterion(x_prime, x)
             running_loss += loss.data
@@ -428,10 +440,10 @@ def train_attacker():
                 running_loss = running_loss / (PRINT_FREQ)
                 print("Iteration {} Loss: {:.4f}".format(count, running_loss))
 
-                pic = to_img(x_prime[0, :].detach().cpu().unsqueeze(0).data)
-                save_image(pic, PREFIX + '{}_image_{}.png'.format(TASK, count))
-                pic = to_img(x[0, :].detach().cpu().unsqueeze(0).data)
-                save_image(pic, PREFIX + '{}_image_{}_gt.png'.format(TASK, count))
+                # pic = to_img(x_prime[0, :].detach().cpu().unsqueeze(0).data)
+                # save_image(pic, PREFIX + '{}_image_{}.png'.format(TASK, count))
+                # pic = to_img(x[0, :].detach().cpu().unsqueeze(0).data)
+                # save_image(pic, PREFIX + '{}_image_{}_gt.png'.format(TASK, count))
                 if(running_loss < best_loss):
                     best_loss = running_loss
                     print("save model best loss {:.4f}".format(best_loss))
@@ -446,40 +458,49 @@ def evaluate_attacker(path, figname):
     # first load the data
     PRINT_FREQ = 10
     CACHED = False
-    theta_0 = load('{}_theta_0.pkl'.format(TASK))
+    theta_0 = load('{}_theta_0_new.pkl'.format(TASK))
     theta_0_arr = torch.FloatTensor(concat_param(theta_0))
     theta_0 = reform(theta_0)
     rep_dims = [500, 200, 100, 50]
     feature_dims = [256] # 64
 
     attacker = Attacker(theta_0, rep_dims, feature_dims)
-    attacker.eval()
+    # attacker.eval()
     attacker.cuda()
     PATH = PREFIX + path
     print("Loading Model and Resume ...")
     attacker.load_state_dict(torch.load(PATH))
 
     print("Loading atk test dataset ...")
-    dataset = load('{}_atk_dataset.test.pkl'.format(TASK))
+    dataset = load('{}_atk_dataset_new.test.pkl'.format(TASK))
     print("convert to torch dataset ...")
     X = []
     Y = []
-    for x, y in dataset:
+    labels = []
+    for x, y, label in dataset:
         X.append(torch.FloatTensor(x))
         Y.append(torch.FloatTensor(y).unsqueeze(0))
+        labels.append(label)
     X = torch.cat(X, dim = 0)
     Y = torch.cat(Y, dim = 0)
+    labels = torch.LongTensor(labels)
+    
     print(X.size())
     print(Y.size())
+    print(labels.size())
     theta_1 = Y.cuda()
     x = X.cuda()
+    labels = labels.cuda()
     _theta_0 = theta_0_arr.unsqueeze(0).repeat_interleave(Y.size(0), dim = 0).cuda()
-    x_prime = attacker(_theta_0, theta_1)
+    x_prime = attacker(_theta_0, theta_1, labels)
+    
+    mse_loss = F.mse_loss(x.view(x.size(0), 3, 32, 32), x_prime.view(x.size(0), 3, 32, 32))
     x = to_img(x.detach().cpu().data)
     x_prime = to_img(x_prime.detach().cpu().data)
     print(x.shape)
     print(x_prime.shape)
-    mse_loss = F.mse_loss(x, x_prime)
+    mse_loss = F.mse_loss(x.view(x.size(0), 3, 32, 32), x_prime.view(x.size(0), 3, 32, 32))
+    # mse_loss = F.mse_loss(x, x_prime)
     print("MSE Loss: {}".format(mse_loss.data))
     x = x[1:, :, :, :]
     x_prime = x_prime[1:, :, :, :]
@@ -511,8 +532,8 @@ def evaluate_attacker(path, figname):
     
             
 if __name__ == '__main__':
-    PATH = 'attacker_concat_full_bn.cpt'
-    evaluate_attacker(PATH, 'concat_full_eval')
+    PATH = 'attacker_delta_with_label.cpt'
+    evaluate_attacker(PATH, 'delta_eval_with_label')
     # train_attacker()
     # collect_training_data()
     # collect_test_data()
