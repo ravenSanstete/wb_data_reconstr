@@ -19,10 +19,11 @@ import torch.utils.data as data_util
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import time
 
 
 TASK = 'cifar10'
-
+PLOT_PREFIX = 'single'
 if(TASK == 'mnist'):
     from mnist import img_transform, dataset, test_dataset, to_img, postprocess, classifier, small_classifier, Reconstructor
     INPUT_DIM = 28 * 28
@@ -519,7 +520,143 @@ def evaluate_attacker(path, figname):
     grid = torchvision.utils.make_grid(imgs, nrow = 32)
     show(grid, figname)
     
+def show(img, name):
+    fig, ax = plt.subplots(figsize=(20, 10))
+    npimg = img.numpy()
+    ax.imshow(np.transpose(npimg, (1,2,0)))
+    plt.savefig("{}/result_{}.png".format(PLOT_PREFIX, name))
+    print("Plot in {}".format("{}/result_{}.png".format(PLOT_PREFIX, name)))
+    plt.close(fig)
 
+
+
+## implement the method in "Deep Leakage from Gradients" (https://arxiv.org/pdf/1906.08935.pdf)
+def reconstruction():
+    one_dataloader = DataLoader(test_dataset, batch_size = 1, shuffle = True)
+    model = small_classifier().cuda()
+    theta_0 = load('{}_theta_0_new.pkl'.format(TASK))
+    theta_0 = reform(theta_0)
+    copy_from_param(model, theta_0)
+    TEST_SIZE = 128
+    criterion = nn.CrossEntropyLoss()
+    learning_rate = 1
+    rep_dims = [500, 200, 100, 50]
+    feature_dims = [256] # 64
+
+    attacker = Attacker(theta_0, rep_dims, feature_dims)
+    optimizer = torch.optim.Adam(model.parameters(), lr = learning_rate)
+    theta_t_0 = get_parameter(model)
+    data = []
+    count = 0
+    IMG_SIZE = (1, 3, 32, 32)
+    CLS_NUM = 10
+    # then load the test data
+    hat_x = torch.tensor(np.random.randn(*IMG_SIZE)*0.1, requires_grad = True, dtype = torch.float32)
+    hat_y = torch.tensor(np.random.randn(CLS_NUM), requires_grad = True, dtype = torch.float32)
+    # hat_y = F.softmax(hat_y)
+    # add some softmax to hat_y
+    TEST_SIZE = 2
+    # learning_rate = 0.005
+    
+    ## load the test_data 
+    print("Loading atk test dataset ...")
+    dataset = load('{}_atk_dataset_new.test.pkl'.format(TASK))
+    print("convert to torch dataset ...")
+    X = []
+    Y = []
+    labels = []
+    for x, y, label in dataset:
+        X.append(torch.FloatTensor(x))
+        Y.append(torch.FloatTensor(y).unsqueeze(0))
+        labels.append(label)
+    X = torch.cat(X, dim = 0)
+    Y = torch.cat(Y, dim = 0)
+    labels = torch.LongTensor(labels)
+    
+    print(X.size())
+    print(Y.size())
+    print(labels.size())
+    theta_1 = Y.cuda()
+    x = X.cuda()
+    labels = labels.cuda()
+
+    hat_x, hat_y = hat_x.cuda(), hat_y.cuda()
+
+    sample_lr = 0.1
+    ITER_NUM = 100000
+    PRINT_FREQ = 100
+    padding = torch.FloatTensor(np.ones((CLS_NUM)) * 0.01).cuda()
+
+    
+    imgs = []
+
+    # sample_optimizer = torch.optim.Adam([hat_x, hat_y], lr = sample_lr)
+    for i in range(TEST_SIZE):
+
+        theta_1_list = attacker.extractor.split(theta_1[i, :].unsqueeze(0))
+        delta_w = [(x - y).squeeze(0) for x, y in zip(theta_1_list, theta_0)]
+        imgs.append(to_img(x[i,:,:,:].unsqueeze(0).detach().cpu().data))
+        
+        start = time.time()
+        for j in range(ITER_NUM):
+            # hat_x.zero_grad()
+            # hat_y.zero_grad()
+            model.zero_grad()
+            # print(delta_w)
+            # now use the hat_x to generate the gradient
+            preds = F.softmax(model(hat_x))
+            hat_y = F.softmax(hat_y)
+            # print(preds)
+            # turn off the gradient at hat_x and hat_y
+            
+            loss = (preds * (preds / hat_y).log()).sum()
+            # print(loss)
+            f_delta_theta = autograd.grad([loss], model.parameters(), retain_graph = True, create_graph = True)
+            # print(f_delta_theta)
+            # print(len(f_delta_theta))
+            # compute the sample_loss
+            sample_loss = torch.stack([F.mse_loss(learning_rate * x, y) for x, y in zip(f_delta_theta, delta_w)], dim = 0).sum()
+            # print(sample_loss)
+            delta_sample = autograd.grad([sample_loss], [hat_x, hat_y])
+            # print(delta_sample)
+            
+            hat_x = hat_x - sample_lr * delta_sample[0]
+            hat_y = hat_y - sample_lr * delta_sample[1]
+            mse = F.mse_loss(hat_x, x[i,:,:,:].unsqueeze(0))
+    
+            if(j % PRINT_FREQ == 0):
+                end = time.time()
+                print("Iter {} MSE: {:.4f} Grad: {:.4f} Loss: {:.4f} Time: {:.4f}".format(j, mse.data, delta_sample[0].norm(), sample_loss.data, end - start))
+                print(hat_y)
+                # print(hat_x)
+                start = end
+                
+            # clear the retained graph
+            mse = None
+            delta_sample = None
+            sample_loss = None
+            f_delta_theta = None
+        imgs.append(to_img(hat_x.detach().cpu().data))
+    figname = "test_{}".format(TEST_SIZE)
+    imgs = torch.cat(imgs, dim = 0)
+    print(imgs.shape)
+    grid = torchvision.utils.make_grid(imgs, nrow = 32)
+    show(grid, figname)
+    
+
+    
+                
+        
+        
+        
+        
+
+    
+    
+    
+
+    
+    
     
     
     
@@ -533,7 +670,8 @@ def evaluate_attacker(path, figname):
             
 if __name__ == '__main__':
     PATH = 'attacker_delta_with_label.cpt'
-    evaluate_attacker(PATH, 'delta_eval_with_label')
+    # evaluate_attacker(PATH, 'delta_eval_with_label')
     # train_attacker()
     # collect_training_data()
     # collect_test_data()
+    reconstruction()

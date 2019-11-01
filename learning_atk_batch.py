@@ -22,17 +22,21 @@ import matplotlib.pyplot as plt
 import argparse
 parser = argparse.ArgumentParser(description='MultiSample Attack')
 parser.add_argument("-r", action='store_true', help = 'whether to be conditioned on the gradient or not')
+parser.add_argument("--func", type = str, default = 'atk', help = 'the functional of this code')
 
 
 ARGS = parser.parse_args()
 TASK = 'cifar10'
 REGRESSION = ARGS.r
+GP = True
+
+MODEL_PATH = 'mulsample_attacker_new.cpt'
 
 if(REGRESSION):
-    PLOT_PREFIX = "mulsample"
+    PLOT_PREFIX = "mulsample_new"
     print("FROM NOISE")
 else:
-    PLOT_PREFIX = "mulsample_atk"
+    PLOT_PREFIX = "mulsample_save"
     print("FROM GRADIENT")
 
 if(TASK == 'mnist'):
@@ -106,18 +110,18 @@ class Generator(nn.Module):
         preprocess = nn.Sequential(
             nn.Linear(in_dim, 4 * 4 * 4 * DIM),
             nn.BatchNorm1d(4 * 4 * 4 * DIM),
-            nn.LeakyReLU(),
+            nn.ReLU(),
         )
 
         block1 = nn.Sequential(
             nn.ConvTranspose2d(4 * DIM, 2 * DIM, 2, stride=2),
             nn.BatchNorm2d(2 * DIM),
-            nn.LeakyReLU(),
+            nn.ReLU(),
         )
         block2 = nn.Sequential(
             nn.ConvTranspose2d(2 * DIM, DIM, 2, stride=2),
             nn.BatchNorm2d(DIM),
-            nn.LeakyReLU(),
+            nn.ReLU(),
         )
         deconv_out = nn.ConvTranspose2d(DIM, 3, 2, stride=2)
         self.preprocess = preprocess
@@ -145,7 +149,7 @@ class Discriminator(nn.Module):
             nn.Conv2d(DIM, 2 * DIM, 3, 2, padding=1),
             nn.LeakyReLU(),
             nn.Conv2d(2 * DIM, 4 * DIM, 3, 2, padding=1),
-            nn.LeakyReLU(),
+            nn.LeakyReLU()
         )
 
         self.main = main
@@ -156,6 +160,7 @@ class Discriminator(nn.Module):
         output = output.view(-1, 4*4*4*DIM)
         output = self.linear(output)
         return output
+    
 
 
 
@@ -230,9 +235,37 @@ def calc_gradient_penalty(netD, real_data, fake_data, batch_size):
     return gradient_penalty 
 
 
+def mean_square(img0, img1):
+    img0 = img0.flatten()
+    img1 = img1.flatten()
+    return np.mean((img0 - img1) ** 2)
 
+def match_img(x0, x1):
+    x1_matched = np.zeros_like(x1)
+    avg_dist = 0.0
+    n = len(x0)
+    cost_matrix = np.zeros((n, n))
+    
+    for i in range(len(x0)):
+        cost_matrix[i, :] = [mean_square(x0[i], xp) for xp in x1]
+    print(cost_matrix)
+    
+    from munkres import Munkres
+    m = Munkres()
+    indexes = m.compute(cost_matrix.copy())
 
-def train_attacker():
+    for i, idx in indexes:
+        avg_dist += cost_matrix[i, idx]
+        x1_matched[i, :, :, :] = x1[idx, :, :, :]
+        avg_dist += cost_matrix[i, idx]
+    avg_dist /= len(x0)
+    print("MSE: {:.4f}".format(avg_dist))
+    return x1_matched
+        
+        
+        
+
+def evaluate_attacker(path):
     # first load the data
     PRINT_FREQ = 100
     PLOT_FREQ = 100
@@ -244,14 +277,84 @@ def train_attacker():
     feature_dims = [128] # 64
     use_l1_loss = True
     batch_size = 64
+    NOISE_DIM = 8 # 8
+    CRITIC_ITERS = 5 # How many critic iterations per generator iteration
+    best_w_dist = 1000.0
+    
+    attacker = Attacker(theta_0, rep_dims, feature_dims, batch_size, NOISE_DIM)
+    attacker.cuda()
+    print("Loading Model and Resume ...")
+    attacker.load_state_dict(torch.load(path))
+    
+    print("Loading atk test dataset ...")
+    dataset = load('{}_atk_dataset_new.test.pkl'.format(TASK))
+    print("convert to torch dataset ...")
+    X = []
+    Y = []
+    labels = []
+    for x, y, label in dataset:
+        X.append(torch.FloatTensor(x))
+        Y.append(torch.FloatTensor(y).unsqueeze(0))
+        labels.append(label)
+    X = torch.cat(X, dim = 0)[:batch_size,:, :, :]
+    Y = torch.cat(Y, dim = 0)[:batch_size,:]
+    labels = torch.LongTensor(labels)
+    
+    print(X.size())
+    print(Y.size())
+    print(labels.size())
+    theta_1 = Y.cuda()
+    x = X.cuda()
+    labels = labels.cuda()
+    theta_1 = torch.mean(theta_1, dim=0, keepdim = True)
+    _theta_0 = theta_0_arr.unsqueeze(0)
+    _theta_0 = _theta_0.cuda()
+    faked = attacker(_theta_0, theta_1)
+    print(faked.size())
+
+    faked = to_img(faked.detach().cpu().data)
+    x = to_img(x.detach().cpu().data)
+        
+    faked = torch.FloatTensor(match_img(x.numpy(), faked.numpy()))
+   
+    # print(faked.size())
+
+    # to match
+    figname = "{}_eval".format(path.split('.')[0])
+    imgs = []
+    for i in range(x.size(0)):
+        imgs.append(faked[i, :, :, :].unsqueeze(0))
+        imgs.append(x[i, :, :, :].unsqueeze(0))
+    
+    imgs = torch.cat(imgs, dim = 0)
+    grid = torchvision.utils.make_grid(imgs, nrow = 16)
+    show(grid, figname)
+    
+
+
+
+def train_attacker():
+    # first load the data
+    PRINT_FREQ = 100
+    PLOT_FREQ = 5000
+    CACHED = False
+    theta_0 = load('{}_theta_0_new.pkl'.format(TASK))
+    theta_0_arr = torch.FloatTensor(concat_param(theta_0))
+    theta_0 = reform(theta_0)
+    rep_dims = [500, 200, 100, 50]
+    feature_dims = [128] # 64
+    use_l1_loss = True
+    batch_size = 64
     NOISE_DIM = 128
     CRITIC_ITERS = 5 # How many critic iterations per generator iteration
-
+    best_w_dist = 1000.0
     
     attacker = Attacker(theta_0, rep_dims, feature_dims, batch_size, NOISE_DIM)
     attacker.cuda()
     netD = Discriminator()
     netD.cuda()
+
+
     
     # PATH = PREFIX + 'attacker_delta_with_label.cpt'
     # if(CACHED):
@@ -269,7 +372,7 @@ def train_attacker():
     ## load training set
     print("Loading atk dataset ...")
     dataset = load('{}_atk_dataset_new.pkl'.format(TASK))
-    criterion = nn.L1Loss()  # nn.L1Loss() #
+    criterion = nn.MSELoss()  # nn.L1Loss() #
     max_epoch = 500
 
     running_loss = 0.0
@@ -309,12 +412,12 @@ def train_attacker():
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last = True)
 
     
-
-    optimizerD = optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
-    optimizerG = optim.Adam(attacker.parameters(), lr=1e-4, betas=(0.5, 0.9))
-
-    one = torch.FloatTensor([1]).cuda()
-    mone = one * -1
+    if(GP):
+        optimizerD = optim.Adam(netD.parameters(), lr=1e-4, betas=(0.5, 0.9))
+        optimizerG = optim.Adam(attacker.parameters(), lr=1e-4, betas=(0.5, 0.9))
+    else:
+        optimizerD = optim.Adam(netD.parameters(), lr=5e-5, betas=(0.5, 0.99))
+        optimizerG = optim.Adam(attacker.parameters(), lr=5e-5, betas=(0.5, 0.99))
     
     print(theta_0_arr.shape)
     # do pretrain the reconstructor part
@@ -323,6 +426,9 @@ def train_attacker():
     running_D_cost = 0.0
     running_reconstruction_cost = 0.0
     running_w_dist = 0.0
+    running_gp = 0.0
+    CLAMP_LOWER = -0.01
+    CLAMP_UPPER = 0.01
 
     print("Attack Arch:{}".format(attacker))
     print("D Arch: {}".format(netD))
@@ -347,19 +453,16 @@ def train_attacker():
                 p.requires_grad = True
             # critical phase
             for i in range(CRITIC_ITERS):
+                # for p in netD.parameters():
+                #     p.data.clamp_(CLAMP_LOWER, CLAMP)
                 netD.zero_grad()
                 faked = attacker(_theta_0, theta_1)
-                D_real = netD(x)
-                D_real = D_real.mean()
-                D_real.backward(mone)
-                D_fake = netD(faked)
-                D_fake = D_fake.mean()
-                D_fake.backward(one)
-                       # train with gradient penalty
+                D_real = netD(x).mean()
+                D_fake = netD(faked).mean()
                 gradient_penalty = calc_gradient_penalty(netD, x.data, faked.data, batch_size)
-                gradient_penalty.backward()
                 D_cost = D_fake - D_real + gradient_penalty
                 Wasserstein_D = D_real - D_fake
+                D_cost.backward()
                 optimizerD.step()
                 # print(D_cost)
             
@@ -370,8 +473,10 @@ def train_attacker():
             faked = attacker(_theta_0, theta_1)
             G = netD(faked)
             G = G.mean()
-            # G.backward(mone)
-            reconstruction_loss = criterion(faked, x)
+            reconstruction_loss = 0.0
+            for i in range(batch_size):
+                reconstruction_loss += criterion(faked[i, :, :, :].unsqueeze(0).repeat_interleave(batch_size, dim = 0), x)
+            
 
             if(not REGRESSION):
                 G_cost = -G + reconstruction_loss
@@ -383,6 +488,7 @@ def train_attacker():
             running_D_cost += D_cost.data
             running_reconstruction_cost += reconstruction_loss.data
             running_w_dist += Wasserstein_D.data
+            running_gp += gradient_penalty.data
             
                         
             if(count % PRINT_FREQ == 0):
@@ -390,11 +496,19 @@ def train_attacker():
                 running_G_cost /= PRINT_FREQ
                 running_reconstruction_cost /= PRINT_FREQ
                 running_w_dist /= PRINT_FREQ
-                print("Iter {} G Cost: {:.4f}, D Cost: {:.4f} Rec Cost: {:.4f} W Dist: {:.4f}".format(count, running_G_cost, running_D_cost, running_reconstruction_cost, running_w_dist))
+                running_gp /= PRINT_FREQ
+                print("Iter {} G Cost: {:.4f}, D Cost: {:.4f} Rec Cost: {:.4f} W Dist: {:.4f} GP: {:.4f}".format(count, running_G_cost, running_D_cost, running_reconstruction_cost, running_w_dist, running_gp))
+                # save model
+                if(running_w_dist < best_w_dist):
+                    best_w_dist = running_w_dist
+                    print("Save Attacker {:.4f}".format(best_w_dist))
+                    torch.save(attacker.state_dict(), MODEL_PATH)
                 running_D_cost = 0.0
                 running_G_cost = 0.0
                 running_reconstruction_cost = 0.0
                 running_w_dist = 0.0
+                running_gp = 0.0
+
 
             if(count % PLOT_FREQ == 0):
                 # evaluate the generator
@@ -413,5 +527,9 @@ def train_attacker():
     # save data
 
 if __name__ == '__main__':
-    train_attacker()
+    if(ARGS.func == 'atk'):
+        train_attacker()
+    else:
+        evaluate_attacker(MODEL_PATH)
+    
     

@@ -11,7 +11,7 @@ from scipy import ndimage
 
 img_transform = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
 ])
 
 
@@ -22,8 +22,8 @@ test_dataset = CIFAR10('./data', train=False, transform=img_transform)
 
 def to_img(x):
     x = x.view(x.size(0), 3, 32, 32)
-    std = torch.FloatTensor([0.2023, 0.1994, 0.2010])
-    mean = torch.FloatTensor([0.4914, 0.4822, 0.4465])
+    std = torch.FloatTensor([0.5, 0.5, 0.5])
+    mean = torch.FloatTensor([0.5, 0.5, 0.5])
     unnormalize = transforms.Normalize((-mean / std).tolist(), (1.0 / std).tolist())
     x = torch.FloatTensor(np.array([unnormalize(x[i, :, :, :]).numpy() for i in range(x.size(0))]))
     # x = x.clamp(0, 1)
